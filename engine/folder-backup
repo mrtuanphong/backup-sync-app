@@ -158,6 +158,20 @@ else
 fi
 RSYNC+=(--exclude=/.backup-logs)
 
+# Cancel (the app sends SIGTERM to the whole process group): rsync stops, then remove this run's unfinished
+# snapshot so it never counts as a backup. Earlier snapshots and `latest` are untouched; once `latest` points at
+# this snapshot it is complete and is kept.
+on_cancel() {
+  trap - TERM INT
+  echo "Đã huỷ theo yêu cầu."
+  if [[ $DRY -eq 0 && $SNAPSHOT -eq 1 && "$TARGET" == "$ROOT/$STAMP" && -d "$TARGET" \
+        && "$(readlink "$ROOT/latest" 2>/dev/null)" != "$STAMP" ]]; then
+    rm -rf "$TARGET" && echo "Đã xoá bản sao lưu dang dở $STAMP. Các bản sao lưu trước vẫn nguyên vẹn."
+  fi
+  exit 130
+}
+trap on_cancel TERM INT
+
 echo "Đang chép…"
 start=$(date +%s)
 "${RSYNC[@]}" "$SRC/" "$RUN_TARGET/" >"$LOG" 2>&1

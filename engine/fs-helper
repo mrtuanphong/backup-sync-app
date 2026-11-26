@@ -9,7 +9,7 @@
   fs-helper schedule-list
   fs-helper schedule-remove LABEL
 """
-import json, os, plistlib, subprocess, sys, time
+import json, os, plistlib, signal, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 ENGINE = os.path.join(HERE, "folder-sync")
@@ -143,6 +143,14 @@ def main(argv):
         print("Lịch:   " + ("; ".join(c for _, c in s) if s else "(chưa hẹn)"))
     elif cmd == "run":
         dry = "--dry-run" in argv
+        # Own process group, so the app can cancel with kill(-pid, SIGTERM) and reach rsync too. The handler only
+        # records the cancel: Python keeps waiting for the child, which cleans up and reports before we exit.
+        cancelled = []
+        try:
+            os.setpgrp()
+        except OSError:
+            pass
+        signal.signal(signal.SIGTERM, lambda *_: cancelled.append(True))
         if not os.path.isdir(cfg["dest"]):
             msg = f"Lỗi: không tìm thấy thư mục Đích {cfg['dest']} (ổ đã cắm chưa?)"
             if "--notify" in argv:
@@ -152,10 +160,14 @@ def main(argv):
         if cfg["direction"] in ("b2a", "both"):
             code, msg = run_restore(cfg, dry)
             out.append(msg)
-        if cfg["direction"] in ("a2b", "both") and code == 0:
+        if cfg["direction"] in ("a2b", "both") and code == 0 and not cancelled:
             r = subprocess.run(backup_cmd(cfg, dry), capture_output=True, text=True)
             out.append((r.stdout + r.stderr).strip())
             code = r.returncode
+        if cancelled:
+            code = 130
+            if not any("Đã huỷ" in o for o in out):
+                out.append("Đã huỷ theo yêu cầu.")
         text = "\n\n".join(out)
         print(time.strftime("[%Y-%m-%d %H:%M:%S]"))
         print(text)
