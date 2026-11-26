@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""folder-sync — đồng bộ hai thư mục (A → B, B → A hoặc hai chiều), kể cả file ẩn và symlink.
+
+Chạy không kèm gì để chọn thư mục bằng Finder. `folder-sync --help` để xem đủ tuỳ chọn.
+"""
+import argparse, hashlib, json, os, shutil, socket, subprocess, sys, time
+
+VERSION = "1.0"
+META = ".folder-sync"            # trạng thái đồng bộ (nằm ở thư mục B)
+TRASH = ".folder-sync-trash"     # file bị xoá/ghi đè được chuyển vào đây, không mất hẳn
+ALWAYS_SKIP = {META, TRASH, ".DS_Store", ".backup-logs"}
+CONFIG = os.path.expanduser("~/.config/folder-sync/last.json")
+HOST = socket.gethostname().split(".")[0]
+
+
+NOTIFY = False
+
+
+def notify(text, title="Backup & Sync"):
+    if NOTIFY:
+        t = text.replace("\\", "\\\\").replace('"', '\\"')
+        subprocess.run(["osascript", "-e", f'display notification "{t}" with title "{title}"'], capture_output=True)
+
+
+def die(msg):
+    print(f"Lỗi: {msg}", file=sys.stderr)
+    notify(f"Lỗi: {msg}")
+    sys.exit(1)
+
+
+def pick_folder(prompt):
+    script = f'try\nPOSIX path of (choose folder with prompt "{prompt}")\nend try'
+    out = subprocess.run(["osascript", "-e", script], capture_output=True, text=True).stdout.strip()
+    return out.rstrip("/") if out else ""
+
+
+def scan(root, excludes):
+    """{relative path: (kind, size, mtime)} cho file và symlink (kể cả ẩn). kind: f | l."""
+    found = {}
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, root)
+        rel_dir = "" if rel_dir == "." else rel_dir
+        keep = []
+        for d in dirnames:
+            rel = os.path.join(rel_dir, d)
+            if d in ALWAYS_SKIP or matches(rel, d, excludes):
+                continue
+            if os.path.islink(os.path.join(dirpath, d)):  # symlink tới thư mục: coi như một file
+                filenames.append(d)
+                continue
+            keep.append(d)
+        dirnames[:] = keep
+        for name in filenames:
+            rel = os.path.join(rel_dir, name)
+            if name in ALWAYS_SKIP or matches(rel, name, excludes):
+                continue
+            try:
+                st = os.lstat(os.path.join(dirpath, name))
+            except OSError:
+                continue
+            kind = "l" if os.path.islink(os.path.join(dirpath, name)) else "f"
+            found[rel] = (kind, st.st_size, st.st_mtime_ns)
+    return found
+
+
+def matches(rel, name, patterns):
+    import fnmatch
+    return any(fnmatch.fnmatch(name, p) or fnmatch.fnmatch(rel, p) for p in patterns)
+
+
+def same(a, b):
+    """Chữ ký giống hệt (dùng để so với trạng thái lần trước của CÙNG một bên)."""
+    return a is not None and b is not None and tuple(a) == tuple(b)
+
+
+def digest(path):
+    if os.path.islink(path):
+        return "link:" + os.readlink(path)
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def equal_files(p, a, b, A_root, B_root):
+    """A và B có cùng nội dung? Khác kích thước/loại → khác; cùng thời gian sửa → giống; còn lại so nội dung."""
+    if a is None or b is None or a[0] != b[0] or a[1] != b[1]:
+        return False
+    if a[2] == b[2]:
+        return True
+    sec_a, frac_a = divmod(a[2], 10**9)
+    sec_b, frac_b = divmod(b[2], 10**9)
+    if sec_a == sec_b and (frac_a == 0 or frac_b == 0):
+        return True  # bản do rsync chép: thời gian bị làm tròn tới giây
+    return digest(os.path.join(A_root, p)) == digest(os.path.join(B_root, p))
+
+
+def state_path(a, b):
+    key = hashlib.sha1(f"{HOST}:{os.path.realpath(a)}".encode()).hexdigest()[:12]
+    return os.path.join(b, META, f"{HOST}__{key}.json")
+
+
+def load_state(a, b):
+    p = state_path(a, b)
+    if not os.path.exists(p):
+        return None
+    with open(p) as f:
+        data = json.load(f)
+    if data.get("v") != 3:
+        return None  # trạng thái cũ: coi như lần đầu (an toàn: khác nhau → xung đột, giữ cả hai)
+    return {k: (tuple(v[0]) if v[0] else None, tuple(v[1]) if v[1] else None) for k, v in data["files"].items()}
+
+
+def save_state(a, b, files):
+    p = state_path(a, b)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p + ".tmp", "w") as f:
+        json.dump({"v": 3, "host": HOST, "a": os.path.realpath(a), "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                   "files": files}, f)
+    os.replace(p + ".tmp", p)
+
+
+def plan(direction, A, B, last, delete_one_way, A_root, B_root):
+    """Trả về danh sách thao tác: (op, path) với op ∈ a2b, b2a, delA, delB, conflict."""
+    ops = []
+    first = last is None
+    last = last or {}
+    for p in sorted(set(A) | set(B) | set(last)):
+        a, b = A.get(p), B.get(p)
+        la, lb = last.get(p, (None, None))
+        if equal_files(p, a, b, A_root, B_root):
+            continue
+        if direction == "a2b":
+            if a is not None:
+                ops.append(("a2b", p))
+            elif b is not None and delete_one_way:
+                ops.append(("delB", p))
+            continue
+        if direction == "b2a":
+            if b is not None:
+                ops.append(("b2a", p))
+            elif a is not None and delete_one_way:
+                ops.append(("delA", p))
+            continue
+        # hai chiều
+        a_changed = a is not None and not same(a, la)
+        b_changed = b is not None and not same(b, lb)
+        if a is not None and b is not None:
+            if first or (a_changed and b_changed):
+                ops.append(("conflict", p))
+            elif a_changed:
+                ops.append(("a2b", p))
+            else:
+                ops.append(("b2a", p))
+        elif a is not None:                       # chỉ có ở A
+            if lb is not None and not a_changed:
+                ops.append(("delA", p))           # đã bị xoá ở B từ lần trước
+            else:
+                ops.append(("a2b", p))            # mới ở A (hoặc sửa sau khi B xoá)
+        elif b is not None:                       # chỉ có ở B
+            if la is not None and not b_changed:
+                ops.append(("delB", p))
+            else:
+                ops.append(("b2a", p))
+    return ops
+
+
+def rsync(src, dst, paths, dry):
+    if not paths:
+        return
+    if dry:
+        return
+    lst = "\n".join(paths) + "\n"
+    r = subprocess.run(["rsync", "-aHE", "--files-from=-", f"{src}/", f"{dst}/"], input=lst, text=True,
+                       capture_output=True)
+    if r.returncode != 0:
+        print(r.stderr.strip()[:2000], file=sys.stderr)
+        die(f"rsync lỗi khi chép {src} → {dst}")
+
+
+def to_trash(root, rel, stamp):
+    src = os.path.join(root, rel)
+    dst = os.path.join(root, TRASH, stamp, rel)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.move(src, dst)
+    d = os.path.dirname(src)                      # dọn thư mục rỗng còn lại
+    while d != root and os.path.isdir(d) and not os.listdir(d):
+        os.rmdir(d)
+        d = os.path.dirname(d)
+
+
+def conflict_name(rel, stamp):
+    base, ext = os.path.splitext(rel)
+    return f"{base} (conflict {HOST} {stamp}){ext}"
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="folder-sync", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 epilog="Hướng: a2b = A → B · b2a = B → A · both = hai chiều.\n"
+                                        "Ví dụ: folder-sync --direction both ~/work '/Volumes/MyDrive/work'")
+    ap.add_argument("a", nargs="?", help="thư mục A (thường là trên máy này)")
+    ap.add_argument("b", nargs="?", help="thư mục B (thường là trên ổ cứng gắn ngoài)")
+    ap.add_argument("-d", "--direction", choices=["a2b", "b2a", "both"])
+    ap.add_argument("-n", "--dry-run", action="store_true", help="chỉ xem trước, không thay đổi gì")
+    ap.add_argument("--delete", action="store_true",
+                    help="(một chiều) xoá ở bên nhận những file không còn ở bên gửi (chuyển vào thùng rác)")
+    ap.add_argument("-x", "--exclude", action="append", default=[], help="bỏ qua mẫu tên/đường dẫn (lặp lại được)")
+    ap.add_argument("-y", "--yes", action="store_true", help="không hỏi xác nhận")
+    ap.add_argument("--notify", action="store_true", help="hiện thông báo macOS khi xong hoặc lỗi (dùng khi chạy theo lịch)")
+    ap.add_argument("--version", action="version", version=VERSION)
+    o = ap.parse_args()
+    global NOTIFY
+    NOTIFY = o.notify
+    print(time.strftime("[%Y-%m-%d %H:%M:%S]"))
+
+    last_cfg = {}
+    if os.path.exists(CONFIG):
+        try:
+            last_cfg = json.load(open(CONFIG))
+        except Exception:
+            last_cfg = {}
+
+    if not o.a and not o.b:
+        if last_cfg.get("a") and sys.stdin.isatty():
+            print(f"Lần trước: A = {last_cfg['a']}\n           B = {last_cfg['b']}  ({last_cfg.get('direction')})")
+            if input("Dùng lại cặp thư mục này? [Y/n] ").strip().lower() in ("", "y", "c", "có", "yes"):
+                o.a, o.b = last_cfg["a"], last_cfg["b"]
+                o.exclude = o.exclude or last_cfg.get("exclude", [])
+        if not o.a:
+            print("Chọn thư mục A (thường là trên máy này) trong cửa sổ Finder…")
+            o.a = pick_folder("Chọn thư mục A") or sys.exit("Đã huỷ.")
+            print(f"  A: {o.a}")
+            print("Chọn thư mục B (thường là trên ổ cứng gắn ngoài)…")
+            o.b = pick_folder("Chọn thư mục B") or sys.exit("Đã huỷ.")
+            print(f"  B: {o.b}")
+    if not (o.a and o.b):
+        ap.error("cần cả hai thư mục A và B (hoặc không đưa gì để chọn bằng Finder)")
+
+    A_root, B_root = os.path.realpath(os.path.expanduser(o.a)), os.path.realpath(os.path.expanduser(o.b))
+    for r in (A_root, B_root):
+        if not os.path.isdir(r):
+            die(f"không tìm thấy thư mục: {r} (ổ đã cắm chưa?)")
+    if A_root == B_root or A_root.startswith(B_root + os.sep) or B_root.startswith(A_root + os.sep):
+        die("A và B không được trùng nhau hoặc nằm bên trong nhau")
+
+    if not o.direction:
+        print("Chọn hướng đồng bộ:")
+        print("  1) A → B   (đẩy từ A sang B)")
+        print("  2) B → A   (lấy từ B về A)")
+        print("  3) A ⇄ B   (hai chiều)")
+        default = {"a2b": "1", "b2a": "2", "both": "3"}.get(last_cfg.get("direction"), "3")
+        k = (input(f"Nhập 1, 2 hoặc 3 [{default}]: ").strip() or default) if sys.stdin.isatty() else default
+        o.direction = {"1": "a2b", "2": "b2a", "3": "both"}.get(k) or die("lựa chọn không hợp lệ")
+
+    print("Đang đọc hai thư mục…")
+    A = scan(A_root, o.exclude)
+    B = scan(B_root, o.exclude)
+    last = load_state(A_root, B_root) if o.direction == "both" else None
+    ops = plan(o.direction, A, B, last, o.delete, A_root, B_root)
+
+    groups = {k: [p for op, p in ops if op == k] for k in ("a2b", "b2a", "delA", "delB", "conflict")}
+    arrow = {"a2b": "A → B", "b2a": "B → A", "both": "A ⇄ B"}[o.direction]
+    print(f"\nĐồng bộ {arrow}\n  A: {A_root}  ({len(A)} file)\n  B: {B_root}  ({len(B)} file)")
+    if o.direction == "both" and last is None:
+        print("  Lần đầu đồng bộ hai chiều cặp này: file khác nhau ở cả hai bên được coi là xung đột (giữ cả hai).")
+    labels = [("a2b", "chép A → B"), ("b2a", "chép B → A"), ("delA", "xoá ở A (đã xoá ở B)"),
+              ("delB", "xoá ở B" + (" (đã xoá ở A)" if o.direction == "both" else " (không còn ở A)")),
+              ("conflict", "xung đột (sửa ở cả hai bên): giữ bản mới hơn, lưu thêm bản kia")]
+    if not ops:
+        print("\nHai bên đã giống nhau. Không có gì để làm.")
+        if o.yes and not o.dry_run:
+            notify(f"{os.path.basename(A_root)}: đã giống nhau, không có gì để làm.")
+    for k, text in labels:
+        if groups[k]:
+            print(f"\n  {text}: {len(groups[k])}")
+            for p in groups[k][:10]:
+                print(f"     {p}")
+            if len(groups[k]) > 10:
+                print(f"     … và {len(groups[k]) - 10} file nữa")
+    if groups["delA"] or groups["delB"]:
+        print(f"\n  File bị xoá được chuyển vào {TRASH}/<ngày giờ>/ ở bên tương ứng, không mất hẳn.")
+
+    if o.dry_run:
+        print("\n(Chạy thử — chưa thay đổi gì.)")
+        return
+    if ops and not o.yes:
+        if input("\nTiếp tục? [y/N] ").strip().lower() not in ("y", "c", "có", "yes"):
+            sys.exit("Đã huỷ.")
+
+    stamp = time.strftime("%Y-%m-%d_%H%M%S")
+    for p in groups["conflict"]:
+        a, b = A[p], B[p]
+        newer_is_a = a[2] >= b[2]  # bản sửa sau cùng là bản chính
+        loser_root, loser = (B_root, B) if newer_is_a else (A_root, A)
+        cname = conflict_name(p, stamp)
+        os.makedirs(os.path.dirname(os.path.join(loser_root, cname)) or loser_root, exist_ok=True)
+        shutil.move(os.path.join(loser_root, p), os.path.join(loser_root, cname))
+        (groups["a2b"] if newer_is_a else groups["b2a"]).append(p)
+        # bản xung đột cũng được đưa sang bên kia để hai bên giống nhau
+        (groups["b2a"] if newer_is_a else groups["a2b"]).append(cname)
+    for p in groups["delA"]:
+        to_trash(A_root, p, stamp)
+    for p in groups["delB"]:
+        to_trash(B_root, p, stamp)
+    rsync(A_root, B_root, groups["a2b"], False)
+    rsync(B_root, A_root, groups["b2a"], False)
+
+    if o.direction == "both":
+        A2 = scan(A_root, o.exclude)
+        B2 = scan(B_root, o.exclude)
+        diff = [p for p in set(A2) | set(B2) if not equal_files(p, A2.get(p), B2.get(p), A_root, B_root)]
+        save_state(A_root, B_root, {p: [list(A2[p]) if p in A2 else None, list(B2[p]) if p in B2 else None]
+                                    for p in set(A2) | set(B2)})
+        msg = 'hai bên khớp ✓' if not diff else f'{len(diff)} file còn khác nhau: ' + ', '.join(sorted(diff)[:5])
+        print(f"\nXong. Kiểm tra: {msg}")
+        notify(f"{os.path.basename(A_root)}: {len(ops)} thay đổi. {msg}")
+    else:
+        src, dst = (A_root, B_root) if o.direction == "a2b" else (B_root, A_root)
+        S, D = scan(src, o.exclude), scan(dst, o.exclude)
+        missing = [p for p in S if not equal_files(p, S[p], D.get(p), src, dst)]
+        msg = 'bên nhận có đủ mọi file của bên gửi ✓' if not missing else f'{len(missing)} file chưa khớp: ' + ', '.join(sorted(missing)[:5])
+        print(f"\nXong. Kiểm tra: {msg}")
+        notify(f"{os.path.basename(src)} → {os.path.basename(dst)}: {len(ops)} thay đổi. {msg}")
+
+    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+    json.dump({"a": A_root, "b": B_root, "direction": o.direction, "exclude": o.exclude}, open(CONFIG, "w"))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit("\nĐã dừng.")

@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""Backup & Sync helper: settings and schedules for the app (called from the AppleScript UI).
+
+  fs-helper get                      → in thiết lập hiện tại (mỗi dòng key=value)
+  fs-helper set KEY VALUE            → lưu một thiết lập (source, dest, direction, exclude)
+  fs-helper describe                 → mô tả thiết lập cho người đọc
+  fs-helper run [--dry-run]          → chạy đồng bộ theo thiết lập (dùng folder-sync bên cạnh)
+  fs-helper schedule-add daily HH:MM | hourly MM
+  fs-helper schedule-list
+  fs-helper schedule-remove LABEL
+"""
+import json, os, plistlib, subprocess, sys, time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+ENGINE = os.path.join(HERE, "folder-sync")
+BACKUP = os.path.join(HERE, "folder-backup")
+KEEP = "20"
+CFG = os.path.expanduser("~/.config/folder-sync/app.json")
+AGENTS = os.path.expanduser("~/Library/LaunchAgents")
+LOGS = os.path.expanduser("~/Library/Logs/BackupSync")
+PREFIX = "local.backupsync."
+DEFAULTS = {
+    "source": os.path.expanduser("~/workspace/gotit/mathgpt-figma-design-system"),
+    "dest": "/Volumes/4TB - GOT IT and ZTO/Backups",
+    "direction": "a2b",
+    "exclude": "node_modules",
+}
+DIR_TEXT = {"a2b": "Một chiều đi (sao lưu Nguồn → Đích)", "b2a": "Một chiều ngược (khôi phục Đích → Nguồn)",
+            "both": "Hai chiều (khôi phục rồi sao lưu)"}
+
+
+def load():
+    cfg = dict(DEFAULTS)
+    if os.path.exists(CFG):
+        try:
+            cfg.update(json.load(open(CFG)))
+        except Exception:
+            pass
+    return cfg
+
+
+def save(cfg):
+    os.makedirs(os.path.dirname(CFG), exist_ok=True)
+    json.dump(cfg, open(CFG, "w"), ensure_ascii=False, indent=1)
+
+
+def excludes(cfg):
+    return [e.strip() for e in cfg.get("exclude", "").split(",") if e.strip()]
+
+
+def version_root(cfg):
+    """Nơi chứa các bản theo ngày giờ: <Đích>/<tên thư mục nguồn>/ (có đường tắt latest)."""
+    return os.path.join(cfg["dest"], os.path.basename(cfg["source"].rstrip("/")))
+
+
+def backup_cmd(cfg, dry):
+    cmd = ["/bin/bash", BACKUP, "--snapshot", "--keep", KEEP, "-n" if dry else "-y"]
+    for x in excludes(cfg):
+        cmd += ["-x", x]
+    return cmd + [cfg["source"], cfg["dest"]]
+
+
+def restore_plan(cfg, latest):
+    """File cần khôi phục: thiếu ở Nguồn, hoặc ở Nguồn cũ hơn bản sao lưu ít nhất 1 giây và khác kích thước/nội dung.
+    Trùng giây hoặc mới hơn → giữ bản ở Nguồn (không bao giờ ghi đè file mới hơn)."""
+    import filecmp, fnmatch
+    src = cfg["source"].rstrip("/")
+    skip = excludes(cfg) + [".backup-logs"]
+    todo = []
+    for dirpath, dirnames, filenames in os.walk(latest, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, latest)
+        dirnames[:] = [d for d in dirnames if not any(fnmatch.fnmatch(d, x) for x in skip)]
+        for name in filenames:
+            if any(fnmatch.fnmatch(name, x) for x in skip):
+                continue
+            rel = os.path.normpath(os.path.join(rel_dir, name))
+            b, t = os.path.join(dirpath, name), os.path.join(src, rel)
+            if not os.path.lexists(t):
+                todo.append(rel)
+                continue
+            if os.path.islink(b) or os.path.islink(t):
+                continue
+            bs, ts = os.lstat(b), os.lstat(t)
+            if int(ts.st_mtime) < int(bs.st_mtime) and not filecmp.cmp(b, t, shallow=False):
+                todo.append(rel)
+    return todo
+
+
+def run_restore(cfg, dry):
+    latest = os.path.join(version_root(cfg), "latest")
+    if not os.path.isdir(latest):
+        return 1, f"Lỗi: chưa có bản sao lưu nào ở {os.path.dirname(latest)} (cần chạy Một chiều đi trước, hoặc ổ chưa cắm)."
+    files = restore_plan(cfg, os.path.realpath(latest))
+    head = f"Khôi phục từ {latest} về Nguồn (chỉ file thiếu hoặc cũ hơn, không xoá gì):"
+    if not files:
+        return 0, f"{head}\n  Không có file nào cần khôi phục."
+    code, err = 0, ""
+    if not dry:
+        r = subprocess.run(["/usr/bin/rsync", "-aHE", "--files-from=-", os.path.realpath(latest) + "/",
+                            cfg["source"].rstrip("/") + "/"], input="\n".join(files) + "\n", text=True, capture_output=True)
+        code, err = r.returncode, r.stderr.strip()[:1500]
+    body = "\n".join("     " + f for f in files[:10]) + (f"\n     … và {len(files) - 10} file nữa" if len(files) > 10 else "")
+    verb = "sẽ chép" if dry else "đã chép"
+    return code, f"{head}\n  {verb} về Nguồn: {len(files)} file\n{body}" + (f"\n{err}" if err else "")
+
+
+def schedules():
+    out = []
+    if not os.path.isdir(AGENTS):
+        return out
+    for f in sorted(os.listdir(AGENTS)):
+        if f.startswith(PREFIX) and f.endswith(".plist"):
+            d = plistlib.load(open(os.path.join(AGENTS, f), "rb"))
+            out.append((d["Label"], d.get("Comment", "")))
+    return out
+
+
+def notify(text):
+    t = text.replace("\\", "\\\\").replace('"', '\\"')[:220]
+    subprocess.run(["osascript", "-e", f'display notification "{t}" with title "Backup & Sync"'], capture_output=True)
+
+
+def main(argv):
+    cmd = argv[0] if argv else "get"
+    cfg = load()
+    if "--cfg" in argv:  # lịch hẹn giờ: dùng đúng thiết lập lúc hẹn
+        cfg.update(json.loads(argv[argv.index("--cfg") + 1]))
+    if cmd == "get":
+        for k in ("source", "dest", "direction", "exclude"):
+            print(f"{k}={cfg[k]}")
+    elif cmd == "set":
+        k, v = argv[1], argv[2]
+        if k not in DEFAULTS:
+            sys.exit(f"không có thiết lập '{k}'")
+        cfg[k] = v.rstrip("/") if k in ("source", "dest") else v
+        save(cfg)
+    elif cmd == "describe":
+        print(f"Nguồn:  {cfg['source']}")
+        print(f"Đích:   {cfg['dest']}")
+        print(f"Kiểu:   {DIR_TEXT[cfg['direction']]}")
+        print(f"Bỏ qua: {cfg['exclude'] or '(không)'}")
+        s = schedules()
+        print("Lịch:   " + ("; ".join(c for _, c in s) if s else "(chưa hẹn)"))
+    elif cmd == "run":
+        dry = "--dry-run" in argv
+        if not os.path.isdir(cfg["dest"]):
+            msg = f"Lỗi: không tìm thấy thư mục Đích {cfg['dest']} (ổ đã cắm chưa?)"
+            if "--notify" in argv:
+                notify(msg)
+            sys.exit(msg)
+        out, code = [], 0
+        if cfg["direction"] in ("b2a", "both"):
+            code, msg = run_restore(cfg, dry)
+            out.append(msg)
+        if cfg["direction"] in ("a2b", "both") and code == 0:
+            r = subprocess.run(backup_cmd(cfg, dry), capture_output=True, text=True)
+            out.append((r.stdout + r.stderr).strip())
+            code = r.returncode
+        text = "\n\n".join(out)
+        print(time.strftime("[%Y-%m-%d %H:%M:%S]"))
+        print(text)
+        if "--notify" in argv:
+            last = [l for l in text.splitlines() if l.strip()]
+            notify(f"{os.path.basename(cfg['source'])}: " + (last[-1] if last else ("xong" if code == 0 else "lỗi")))
+        sys.exit(code)
+    elif cmd == "schedule-add":
+        kind = argv[1]
+        if kind == "daily":
+            hh, mm = [int(x) for x in argv[2].split(":")]
+            if not (0 <= hh < 24 and 0 <= mm < 60):
+                sys.exit("giờ không hợp lệ")
+            interval = {"Hour": hh, "Minute": mm}
+            when = f"mỗi ngày lúc {hh:02d}:{mm:02d}"
+        elif kind == "hourly":
+            mm = int(argv[2]) if len(argv) > 2 else 0
+            interval = {"Minute": mm}
+            when = f"mỗi giờ (phút {mm:02d})"
+        else:
+            sys.exit("kiểu lịch: daily HH:MM | hourly MM")
+        label = PREFIX + time.strftime("%Y%m%d%H%M%S")
+        os.makedirs(AGENTS, exist_ok=True)
+        os.makedirs(LOGS, exist_ok=True)
+        frozen = {k: cfg[k] for k in ("source", "dest", "direction", "exclude")}
+        args = ["/usr/bin/python3", os.path.realpath(__file__), "run", "--notify", "--cfg", json.dumps(frozen, ensure_ascii=False)]
+        comment = f"{when} — {os.path.basename(cfg['source'])} → {cfg['dest']} [{DIR_TEXT[cfg['direction']]}]"
+        plist = {
+            "Label": label, "Comment": comment, "ProgramArguments": args,
+            "StartCalendarInterval": interval,
+            "StandardOutPath": os.path.join(LOGS, label + ".log"),
+            "StandardErrorPath": os.path.join(LOGS, label + ".log"),
+        }
+        path = os.path.join(AGENTS, label + ".plist")
+        plistlib.dump(plist, open(path, "wb"))
+        subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", path], capture_output=True)
+        print(f"Đã hẹn: {comment}")
+    elif cmd == "schedule-list":
+        for label, comment in schedules():
+            print(f"{label}\t{comment}")
+    elif cmd == "schedule-remove":
+        label = argv[1]
+        if not label.startswith(PREFIX):
+            sys.exit("lịch không hợp lệ")
+        path = os.path.join(AGENTS, label + ".plist")
+        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"], capture_output=True)
+        if os.path.exists(path):
+            os.remove(path)
+        print("Đã xoá lịch.")
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

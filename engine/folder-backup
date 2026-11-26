@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# folder-backup — sao lưu một thư mục (mọi file, kể cả file ẩn) sang một thư mục khác, ví dụ ổ cứng gắn ngoài.
+# Chạy `folder-backup --help` để xem cách dùng.
+set -uo pipefail
+
+VERSION="1.0"
+PROG="$(basename "$0")"
+
+usage() {
+  cat <<EOF
+$PROG $VERSION — sao lưu một thư mục sang nơi khác (kể cả file ẩn, symlink, quyền, thuộc tính macOS).
+
+Cách dùng:
+  $PROG                                       Mở Finder để chọn thư mục nguồn, rồi thư mục đích.
+  $PROG [tuỳ chọn] <thư mục nguồn> <thư mục đích>
+  (Có thể kéo thả thư mục từ Finder vào Terminal để điền đường dẫn.)
+
+Bản sao lưu nằm ở <thư mục đích>/<tên thư mục nguồn>/.
+Lần đầu chép toàn bộ; các lần sau chỉ chép phần mới hoặc đã đổi.
+
+Tuỳ chọn:
+  -n, --dry-run        Chạy thử: chỉ liệt kê những gì sẽ chép, không ghi gì.
+  -m, --mirror         Bản sao giống hệt nguồn: XOÁ trong bản sao những file đã bị xoá ở nguồn.
+                       (Mặc định KHÔNG xoá gì trong bản sao.)
+  -s, --snapshot       Lưu theo phiên bản: mỗi lần tạo <đích>/<tên>/<ngày_giờ>/ đầy đủ;
+                       file không đổi dùng chung giữa các bản (không tốn thêm dung lượng).
+                       Bản mới nhất luôn có đường tắt <đích>/<tên>/latest.
+  -k, --keep N         (với --snapshot) Chỉ giữ N bản gần nhất, xoá bản cũ hơn.
+  -x, --exclude MẪU    Bỏ qua file/thư mục khớp mẫu (lặp lại được), ví dụ: -x node_modules -x '*.log'
+  -y, --yes            Không hỏi xác nhận.
+  -h, --help           Xem hướng dẫn này.
+
+Ví dụ:
+  $PROG ~/workspace/gotit/mathgpt-figma-design-system /Volumes/MyDrive/Backups
+  $PROG --snapshot --keep 10 ~/Documents/project /Volumes/MyDrive/Backups
+  $PROG --dry-run --mirror ~/Desktop/work /Volumes/MyDrive/Backups
+
+Nhật ký mỗi lần chạy: <đích>/<tên>/.backup-logs/
+EOF
+}
+
+die() { echo "Lỗi: $*" >&2; exit 1; }
+info() { echo "• $*"; }
+
+DRY=0; MIRROR=0; SNAPSHOT=0; KEEP=0; YES=0; EXCLUDES=()
+ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -n|--dry-run) DRY=1 ;;
+    -m|--mirror) MIRROR=1 ;;
+    -s|--snapshot) SNAPSHOT=1 ;;
+    -k|--keep) shift; [[ "${1:-}" =~ ^[0-9]+$ ]] || die "--keep cần một số"; KEEP="$1" ;;
+    -x|--exclude) shift; [[ -n "${1:-}" ]] || die "--exclude cần một mẫu"; EXCLUDES+=("--exclude=$1") ;;
+    -y|--yes) YES=1 ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; ARGS+=("$@"); break ;;
+    -*) die "không hiểu tuỳ chọn '$1' (xem --help)" ;;
+    *) ARGS+=("$1") ;;
+  esac
+  shift
+done
+pick_folder() {  # $1 = lời nhắc; in ra đường dẫn POSIX, rỗng nếu huỷ
+  osascript -e "try" -e "POSIX path of (choose folder with prompt \"$1\")" -e "end try" 2>/dev/null
+}
+if [[ ${#ARGS[@]} -eq 0 ]]; then
+  echo "Chọn thư mục NGUỒN (thư mục cần sao lưu) trong cửa sổ Finder…"
+  s=$(pick_folder "Chọn thư mục NGUỒN cần sao lưu"); [[ -n "$s" ]] || { echo "Đã huỷ."; exit 0; }
+  echo "  Nguồn: $s"
+  echo "Chọn thư mục ĐÍCH (nơi lưu bản sao, ví dụ trên ổ cứng gắn ngoài)…"
+  d=$(pick_folder "Chọn thư mục ĐÍCH để lưu bản sao"); [[ -n "$d" ]] || { echo "Đã huỷ."; exit 0; }
+  echo "  Đích : $d"
+  ARGS=("${s%/}" "${d%/}")
+  if [[ $SNAPSHOT -eq 0 && $MIRROR -eq 0 ]]; then
+    echo "Chọn kiểu sao lưu:"
+    echo "  1) Cộng dồn — chỉ chép phần mới/đã đổi, KHÔNG xoá gì trong bản sao (mặc định)"
+    echo "  2) Giống hệt nguồn — xoá trong bản sao những file đã xoá ở nguồn"
+    echo "  3) Lưu theo phiên bản — mỗi lần một bản đầy đủ có ngày giờ"
+    read -r -p "Nhập 1, 2 hoặc 3 [1]: " k
+    case "$k" in 2) MIRROR=1 ;; 3) SNAPSHOT=1; read -r -p "Giữ bao nhiêu bản gần nhất? (Enter = giữ tất cả): " kk; [[ "$kk" =~ ^[0-9]+$ ]] && KEEP="$kk" ;; esac
+  fi
+fi
+[[ ${#ARGS[@]} -eq 2 ]] || { usage; exit 1; }
+if [[ $KEEP -gt 0 && $SNAPSHOT -eq 0 ]]; then die "--keep chỉ dùng cùng --snapshot"; fi
+if [[ $MIRROR -eq 1 && $SNAPSHOT -eq 1 ]]; then die "--snapshot đã là bản đầy đủ mỗi lần, không cần --mirror"; fi
+
+SRC_IN="${ARGS[0]}"; DEST_IN="${ARGS[1]}"
+[[ -d "$SRC_IN" ]] || die "không tìm thấy thư mục nguồn: $SRC_IN"
+[[ -d "$DEST_IN" ]] || die "không tìm thấy thư mục đích: $DEST_IN (ổ đã cắm chưa?)"
+SRC="$(cd "$SRC_IN" && pwd -P)"
+DEST="$(cd "$DEST_IN" && pwd -P)"
+NAME="$(basename "$SRC")"
+ROOT="$DEST/$NAME"
+
+case "$DEST/" in "$SRC/"*) die "thư mục đích nằm bên trong thư mục nguồn — sẽ tự chép chính nó" ;; esac
+case "$SRC/" in "$ROOT/"*|"$ROOT") die "thư mục nguồn nằm trong chỗ lưu bản sao" ;; esac
+[[ -w "$DEST" ]] || die "không có quyền ghi vào $DEST"
+
+# Định dạng ổ đích: exFAT/FAT không giữ được symlink, quyền file, thuộc tính macOS.
+FSTYPE="$(stat -f %T "$DEST" 2>/dev/null || echo unknown)"
+DEST_FS="$(df -P "$DEST" | awk 'NR==2{print $1}')"
+FSNAME="$(diskutil info "$DEST_FS" 2>/dev/null | awk -F: '/File System Personality/{gsub(/^ +/,"",$2);print $2}')"
+case "${FSNAME:-$FSTYPE}" in
+  *ExFAT*|*exfat*|*MS-DOS*|*msdos*|*FAT32*)
+    echo "CẢNH BÁO: ổ đích định dạng ${FSNAME:-$FSTYPE}. Định dạng này KHÔNG giữ được symlink, quyền chạy và thuộc tính macOS;"
+    echo "          một số thư mục (ví dụ node_modules của pnpm) sẽ không dùng được từ bản sao. Nên format APFS." ;;
+esac
+
+# Dung lượng: cần ít nhất bằng nguồn (lần đầu) + 5%.
+SRC_KB="$(du -sk "$SRC" 2>/dev/null | awk '{print $1}')"
+FREE_KB="$(df -Pk "$DEST" | awk 'NR==2{print $4}')"
+need=$(( SRC_KB + SRC_KB / 20 ))
+if [[ ! -d "$ROOT" && $FREE_KB -lt $need ]]; then
+  die "không đủ chỗ: nguồn ~$((SRC_KB/1024)) MB, ổ đích còn ~$((FREE_KB/1024)) MB"
+fi
+
+STAMP="$(date +%Y-%m-%d_%H%M%S)"
+if [[ $SNAPSHOT -eq 1 ]]; then
+  TARGET="$ROOT/$STAMP"
+  MODE="lưu theo phiên bản (bản mới: $STAMP)"
+else
+  TARGET="$ROOT"
+  if [[ $MIRROR -eq 1 ]]; then MODE="giống hệt nguồn (xoá trong bản sao file đã xoá ở nguồn)"; else MODE="cộng dồn (không xoá gì trong bản sao)"; fi
+fi
+
+echo "Sao lưu thư mục"
+echo "  Nguồn : $SRC  (~$((SRC_KB/1024)) MB)"
+echo "  Đích  : $TARGET"
+echo "  Kiểu  : $MODE"
+[[ ${#EXCLUDES[@]} -gt 0 ]] && echo "  Bỏ qua: ${EXCLUDES[*]//--exclude=/}" || true
+[[ $DRY -eq 1 ]] && echo "  (chạy thử — không ghi gì)"
+if [[ $YES -eq 0 && $DRY -eq 0 ]]; then
+  read -r -p "Tiếp tục? [y/N] " ans
+  [[ "$ans" =~ ^[YyCc] ]] || { echo "Đã huỷ."; exit 0; }
+fi
+
+# -a: đệ quy, giữ symlink/quyền/ngày; -H: giữ hard link; -E: thuộc tính mở rộng macOS. File ẩn luôn được chép.
+RSYNC=(rsync -aHE --stats ${EXCLUDES[@]+"${EXCLUDES[@]}"})
+[[ $DRY -eq 1 ]] && RSYNC+=(-n --itemize-changes)
+[[ $MIRROR -eq 1 ]] && RSYNC+=(--delete)
+if [[ $SNAPSHOT -eq 1 && -d "$ROOT/latest/" ]]; then
+  RSYNC+=("--link-dest=$ROOT/latest/")
+fi
+
+LOGDIR="$ROOT/.backup-logs"
+if [[ $DRY -eq 0 ]]; then
+  mkdir -p "$TARGET" "$LOGDIR" || die "không tạo được $TARGET"
+  LOG="$LOGDIR/$STAMP.log"
+else
+  LOG="$(mktemp -t folder-backup)"
+fi
+RSYNC+=(--exclude=/.backup-logs)
+
+echo "Đang chép…"
+start=$(date +%s)
+"${RSYNC[@]}" "$SRC/" "$TARGET/" >"$LOG" 2>&1
+rc=$?
+secs=$(( $(date +%s) - start ))
+
+if [[ $DRY -eq 1 ]]; then
+  changes=$(grep -cE '^[<>ch.*][fdLDS]' "$LOG" || true)
+  echo "Chạy thử xong: $changes mục sẽ được chép hoặc cập nhật. Chi tiết: $LOG"
+  exit $rc
+fi
+
+if [[ $rc -ne 0 ]]; then
+  echo "CÓ LỖI khi chép (mã $rc). Một phần có thể chưa được sao lưu. Xem: $LOG"
+  grep -iE 'error|denied|failed' "$LOG" | head -10
+  exit $rc
+fi
+
+if [[ $SNAPSHOT -eq 1 ]]; then
+  ln -sfn "$STAMP" "$ROOT/latest"
+  if [[ $KEEP -gt 0 ]]; then
+    ls -1d "$ROOT"/20??-??-??_?????? 2>/dev/null | sort | awk -v k="$KEEP" '{a[NR]=$0} END{for(i=1;i<=NR-k;i++)print a[i]}' |
+      while IFS= read -r d; do rm -rf "$d" && info "đã xoá bản cũ $(basename "$d")"; done
+  fi
+fi
+
+# Kiểm tra: đếm file (kể cả ẩn) và symlink ở nguồn và bản sao, bỏ qua đúng những mục đã loại trừ.
+PRUNE=()
+for e in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do PRUNE+=(-name "${e#--exclude=}" -prune -o); done
+count() { find "$1" ${PRUNE[@]+"${PRUNE[@]}"} -path "$1/.backup-logs" -prune -o \( -type f -o -type l \) -print 2>/dev/null | wc -l | tr -d ' '; }
+n_src=$(count "$SRC"); n_dst=$(count "$TARGET")
+echo "Xong sau ${secs}s. File ở nguồn: $n_src · trong bản sao: $n_dst"
+if [[ $MIRROR -eq 1 || $SNAPSHOT -eq 1 ]]; then
+  [[ "$n_src" == "$n_dst" ]] && echo "Kiểm tra: khớp ✓" || echo "Kiểm tra: số file KHÁC nhau — xem $LOG"
+else
+  [[ "$n_dst" -ge "$n_src" ]] && echo "Kiểm tra: bản sao có đủ file của nguồn ✓ (có thể còn file cũ đã xoá ở nguồn)" || echo "Kiểm tra: bản sao THIẾU file — xem $LOG"
+fi
+echo "Nhật ký: $LOG"
