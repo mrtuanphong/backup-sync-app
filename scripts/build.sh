@@ -5,8 +5,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/build/Backup & Sync.app"
 rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
-swiftc -O -swift-version 5 -parse-as-library -target arm64-apple-macos13.0 \
-  -o "$OUT/Contents/MacOS/BackupSync" "$ROOT/src/BackupSync.swift"
+# Universal binary (Apple Silicon + Intel) so the released app runs on any Mac with macOS 13+.
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+for arch in arm64 x86_64; do
+  swiftc -O -swift-version 5 -parse-as-library -target "$arch-apple-macos13.0" \
+    -o "$TMP/BackupSync-$arch" "$ROOT/src/BackupSync.swift"
+done
+lipo -create -output "$OUT/Contents/MacOS/BackupSync" "$TMP/BackupSync-arm64" "$TMP/BackupSync-x86_64"
 cp "$ROOT/engine/fs-helper" "$ROOT/engine/folder-sync" "$ROOT/engine/folder-backup" "$OUT/Contents/Resources/"
 chmod +x "$OUT/Contents/Resources/"{fs-helper,folder-sync,folder-backup}
 cp "$ROOT/src/Info.plist" "$OUT/Contents/Info.plist"

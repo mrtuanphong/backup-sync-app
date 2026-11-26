@@ -2,6 +2,18 @@
 
 App macOS chỉ có một màn hình, dùng để sao lưu, khôi phục và đồng bộ một thư mục bất kỳ. App chép mọi thứ, kể cả file ẩn, symlink, quyền file và thuộc tính macOS.
 
+![Backup & Sync](docs/screenshot.png)
+
+## Tải về và cài đặt
+
+1. Tải file `.zip` mới nhất ở trang [Releases](https://github.com/mrtuanphong/backup-sync-app/releases/latest), mở file zip.
+2. Kéo **Backup & Sync.app** vào thư mục **Applications** rồi mới mở. Lịch hẹn giờ ghi nhớ vị trí của app, nên đừng chạy thẳng từ Downloads.
+3. Lần mở đầu tiên macOS sẽ chặn vì app chưa được Apple công chứng. Vào **System Settings → Privacy & Security**, kéo xuống và bấm **Open Anyway**. Hoặc chạy lệnh:
+   `xattr -dr com.apple.quarantine "/Applications/Backup & Sync.app"`
+4. Nếu macOS hỏi cài **Command Line Tools** thì bấm Install, vì app cần `python3` của Apple.
+
+Yêu cầu: macOS 13 trở lên, chip Apple Silicon hoặc Intel.
+
 ## Tính năng
 
 - **Nguồn và Đích**: chọn bằng Finder, có nút đổi chỗ hai thư mục.
@@ -22,6 +34,7 @@ App macOS chỉ có một màn hình, dùng để sao lưu, khôi phục và đ�
 | `engine/folder-backup` | Sao lưu theo phiên bản (bash, dùng rsync/openrsync) |
 | `engine/folder-sync` | Đồng bộ hai thư mục A→B, B→A, hai chiều, có nhớ trạng thái (Python). App chưa dùng, có sẵn dạng lệnh |
 | `scripts/build.sh` | Build vào `build/` và cài vào `~/Applications` (`--no-install` để chỉ build) |
+| `scripts/release.sh` | Build bản universal, nén zip và đăng lên GitHub Releases (tag theo phiên bản trong `Info.plist`) |
 | `scripts/install-cli.sh` | Cài `folder-sync` và `folder-backup` vào `~/.local/bin` |
 
 ## Build
@@ -31,6 +44,8 @@ Cần Xcode Command Line Tools (`swiftc`):
 ```
 ./scripts/build.sh
 ```
+
+Phát hành bản mới: tăng `CFBundleShortVersionString` trong `src/Info.plist`, commit, rồi chạy `./scripts/release.sh`.
 
 ## Dữ liệu trên máy
 

@@ -31,7 +31,7 @@ Tuỳ chọn:
   -h, --help           Xem hướng dẫn này.
 
 Ví dụ:
-  $PROG ~/workspace/gotit/mathgpt-figma-design-system /Volumes/MyDrive/Backups
+  $PROG ~/Documents/Projects /Volumes/MyDrive/Backups
   $PROG --snapshot --keep 10 ~/Documents/project /Volumes/MyDrive/Backups
   $PROG --dry-run --mirror ~/Desktop/work /Volumes/MyDrive/Backups
 

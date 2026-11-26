@@ -20,8 +20,8 @@ AGENTS = os.path.expanduser("~/Library/LaunchAgents")
 LOGS = os.path.expanduser("~/Library/Logs/BackupSync")
 PREFIX = "local.backupsync."
 DEFAULTS = {
-    "source": os.path.expanduser("~/workspace/gotit/mathgpt-figma-design-system"),
-    "dest": "/Volumes/4TB - GOT IT and ZTO/Backups",
+    "source": "",
+    "dest": "",
     "direction": "a2b",
     "exclude": "node_modules",
 }
