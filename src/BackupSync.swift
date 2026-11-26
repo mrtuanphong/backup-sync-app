@@ -121,10 +121,13 @@ enum Screen {
 
 @MainActor
 final class Model: ObservableObject {
-    @Published var source = ""
-    @Published var dest = ""
-    @Published var direction: Direction = .a2b
-    @Published var exclude = ""
+    // Changing any of these invalidates the last preview, so "nothing new" no longer applies.
+    @Published var source = "" { didSet { if source != oldValue { nothingNew = nil } } }
+    @Published var dest = "" { didSet { if dest != oldValue { nothingNew = nil } } }
+    @Published var direction: Direction = .a2b { didSet { if direction != oldValue { nothingNew = nil } } }
+    @Published var exclude = "" { didSet { if exclude != oldValue { nothingNew = nil } } }
+    /// Set when the last preview found nothing to copy: Run is disabled and this sentence says why.
+    @Published var nothingNew: String?
     @Published var when: When = .now
     @Published var time = Calendar.current.date(bySettingHour: 18, minute: 0, second: 0, of: Date()) ?? Date()
     @Published var schedules: [Schedule] = []
@@ -167,20 +170,18 @@ final class Model: ObservableObject {
     }
 
     func pick(_ isSource: Bool) {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "Chọn"
-        panel.message = isSource ? "Chọn thư mục Nguồn" : "Chọn thư mục Đích"
-        let current = isSource ? source : dest
-        if !current.isEmpty { panel.directoryURL = URL(fileURLWithPath: current) }
-        if panel.runModal() == .OK, let url = panel.url {
-            if isSource { source = url.path } else { dest = url.path }
+        if let path = chooseFolder(isSource ? "Chọn thư mục Nguồn" : "Chọn thư mục Đích", current: isSource ? source : dest) {
+            if isSource { source = path } else { dest = path }
         }
     }
 
     func swap() { (source, dest) = (dest, source) }
+
+    func apply(_ p: Preset) {
+        source = p.source
+        dest = p.dest
+        exclude = p.exclude
+    }
 
     private func background(_ work: @escaping () -> (Int32, String), done: @escaping (Int32, String) -> Void) {
         busy = true
@@ -206,14 +207,29 @@ final class Model: ObservableObject {
         background({ Helper.run(["run", "--dry-run"]) }) { code, out in
             let text = Model.clean(out)
             self.output = text
+            self.nothingNew = code == 0 ? self.nothingNewReason(text) : nil
             guard thenConfirm else { return }
             guard code == 0 else {
                 // Never fail silently: say why nothing was copied.
                 self.output = "⚠️ Chưa chép gì vì bước xem trước gặp lỗi (mã \(code)).\n\n" + text
                 return
             }
-            if text.contains("Không có gì để làm") { return }
+            if self.nothingNew != nil { return }
             self.confirmText = Model.summary(text)
+        }
+    }
+
+    /// A backup that changes nothing would only add a duplicate snapshot (and push an older one out of the 20 kept).
+    private func nothingNewReason(_ text: String) -> String? {
+        let backupNone = text.contains("Chạy thử xong: 0 mục mới hoặc đã thay đổi")
+        let restoreNone = text.contains("Không có file nào cần khôi phục")
+        switch direction {
+        case .a2b:
+            return backupNone ? "Không có gì thay đổi kể từ bản sao lưu gần nhất, nên chưa cần sao lưu lại." : nil
+        case .b2a:
+            return restoreNone ? "Nguồn đã có đủ file của bản sao lưu gần nhất, nên không có gì để khôi phục." : nil
+        case .both:
+            return backupNone && restoreNone ? "Nguồn và bản sao lưu gần nhất đã giống nhau, nên không có gì để làm." : nil
         }
     }
 
@@ -303,6 +319,9 @@ struct FolderRow: View {
 
 struct ContentView: View {
     @StateObject private var m = Model()
+    @EnvironmentObject private var presets: PresetStore
+    @State private var showSave = false
+    @State private var saveName = ""
 
     /// "v2.1 · build 20261126.1812" — the build number is the build time, stamped by scripts/build.sh.
     static let buildLabel: String = {
@@ -332,6 +351,27 @@ struct ContentView: View {
         VStack(spacing: 0) {
             Form {
                 Section {
+                    LabeledContent {
+                        Menu {
+                            ForEach(presets.items) { p in
+                                Button(p.name) { m.apply(p) }
+                            }
+                            if !presets.items.isEmpty { Divider() }
+                            Button("Lưu Nguồn và Đích hiện tại…") {
+                                saveName = presets.matching(source: m.source, dest: m.dest)?.name
+                                    ?? Preset.suggestedName(source: m.source, dest: m.dest)
+                                showSave = true
+                            }
+                            .disabled(m.source.isEmpty || m.dest.isEmpty)
+                            OpenSettingsButton(title: "Quản lý cấu hình…")
+                        } label: {
+                            Text(presets.matching(source: m.source, dest: m.dest)?.name
+                                 ?? (presets.items.isEmpty ? "Chưa lưu cấu hình nào" : "Chọn cấu hình đã lưu"))
+                        }
+                        .fixedSize()
+                    } label: {
+                        Label("Cấu hình", systemImage: "bookmark")
+                    }
                     FolderRow(label: "Nguồn", symbol: "folder", path: $m.source) { m.pick(true) }
                     FolderRow(label: "Đích", symbol: "externaldrive", path: $m.dest) { m.pick(false) }
                     Text("Bản sao lưu nằm ở Đích/\((m.source as NSString).lastPathComponent)/<ngày_giờ>/ (kèm đường tắt latest).")
@@ -400,6 +440,18 @@ struct ContentView: View {
             .formStyle(.grouped)
 
             Divider()
+            if m.when == .now, let why = m.nothingNew {
+                Label {
+                    Text(why + " Bấm Xem trước để kiểm tra lại khi có thay đổi.")
+                } icon: {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                }
+                .font(.callout)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+            }
             HStack(spacing: 12) {
                 Text(Self.buildLabel)
                     .font(.caption).foregroundStyle(.tertiary)
@@ -414,10 +466,22 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .keyboardShortcut(.defaultAction)
-                .disabled(m.busy)
+                .disabled(m.busy || (m.when == .now && m.nothingNew != nil))
+                .help(m.when == .now ? (m.nothingNew ?? "") : "")
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
+        }
+        .alert("Lưu cấu hình", isPresented: $showSave) {
+            TextField("Tên", text: $saveName)
+            Button("Huỷ", role: .cancel) {}
+            Button("Lưu") {
+                let name = saveName.trimmingCharacters(in: .whitespaces)
+                guard !name.isEmpty else { return }
+                presets.save(Preset(name: name, source: m.source, dest: m.dest, exclude: m.exclude), old: name)
+            }
+        } message: {
+            Text("Lưu Nguồn, Đích và Bỏ qua hiện tại để lần sau chọn nhanh. Trùng tên sẽ cập nhật cấu hình cũ.")
         }
         .alert("Thực hiện đồng bộ?", isPresented: Binding(get: { m.confirmText != nil }, set: { if !$0 { m.confirmText = nil } })) {
             Button("Huỷ", role: .cancel) {}
@@ -425,6 +489,192 @@ struct ContentView: View {
         } message: {
             Text(m.confirmText ?? "")
         }
+    }
+}
+
+// MARK: - Presets (saved Nguồn/Đích pairs), managed in Settings
+
+@MainActor
+func chooseFolder(_ message: String, current: String) -> String? {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.canCreateDirectories = true
+    panel.prompt = "Chọn"
+    panel.message = message
+    if !current.isEmpty { panel.directoryURL = URL(fileURLWithPath: current) }
+    return panel.runModal() == .OK ? panel.url?.path : nil
+}
+
+struct Preset: Codable, Identifiable, Hashable {
+    var name: String
+    var source: String
+    var dest: String
+    var exclude: String
+    var id: String { name }
+
+    /// "mathgpt-figma-design-system → Backups"
+    static func suggestedName(source: String, dest: String) -> String {
+        let s = (source as NSString).lastPathComponent, d = (dest as NSString).lastPathComponent
+        return s.isEmpty ? d : (d.isEmpty ? s : "\(s) → \(d)")
+    }
+}
+
+/// Saved presets live in the helper's settings file (~/.config/folder-sync/app.json, key "presets").
+@MainActor
+final class PresetStore: ObservableObject {
+    @Published private(set) var items: [Preset] = []
+
+    init() { reload() }
+
+    func reload() {
+        let out = Helper.run(["preset-list"]).out
+        items = (try? JSONDecoder().decode([Preset].self, from: Data(out.utf8))) ?? []
+    }
+
+    /// Adds or updates a preset (renaming when `old` differs). Returns an error message, or nil on success.
+    @discardableResult
+    func save(_ p: Preset, old: String? = nil) -> String? {
+        var obj = ["name": p.name, "source": p.source, "dest": p.dest, "exclude": p.exclude]
+        if let old { obj["old"] = old }
+        guard let data = try? JSONSerialization.data(withJSONObject: obj),
+              let json = String(data: data, encoding: .utf8) else { return "Không lưu được." }
+        let r = Helper.run(["preset-save", json])
+        reload()
+        return r.code == 0 ? nil : r.out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func delete(_ p: Preset) {
+        Helper.run(["preset-delete", p.name])
+        reload()
+    }
+
+    func matching(source: String, dest: String) -> Preset? {
+        items.first { $0.source == source && $0.dest == dest }
+    }
+}
+
+/// Opens the Settings window (⌘,) from a button or menu.
+struct OpenSettingsButton: View {
+    let title: String
+    var body: some View {
+        if #available(macOS 14, *) {
+            SettingsLink { Text(title) }
+        } else {
+            Button(title) { NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) }
+        }
+    }
+}
+
+struct SettingsView: View {
+    @EnvironmentObject var store: PresetStore
+    @State private var editing: Preset?
+    @State private var editingOld: String?
+    @State private var toDelete: Preset?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Cấu hình đã lưu").font(.title3.weight(.semibold))
+            Text("Mỗi cấu hình gồm Nguồn, Đích và danh sách Bỏ qua. Ở màn chính, chọn ở mục **Cấu hình** để điền nhanh.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if store.items.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "bookmark").font(.largeTitle).foregroundStyle(.tertiary)
+                    Text("Chưa có cấu hình nào").foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+            } else {
+                List {
+                    ForEach(store.items) { p in
+                        HStack(spacing: 10) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(p.name).font(.body.weight(.medium))
+                                Text("\(p.source)  →  \(p.dest)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                    .lineLimit(1).truncationMode(.middle)
+                            }
+                            Spacer()
+                            Button("Sửa") { editingOld = p.name; editing = p }
+                            Button(role: .destructive) { toDelete = p } label: { Image(systemName: "trash") }
+                                .buttonStyle(.borderless)
+                                .help("Xoá cấu hình này")
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+                .listStyle(.bordered(alternatesRowBackgrounds: true))
+            }
+
+            HStack {
+                Button {
+                    editingOld = nil
+                    editing = Preset(name: "", source: "", dest: "", exclude: "node_modules")
+                } label: { Label("Thêm cấu hình…", systemImage: "plus") }
+                Spacer()
+            }
+        }
+        .padding(20)
+        .frame(width: 560, height: 420)
+        .sheet(item: $editing) { p in
+            PresetEditor(draft: p, old: editingOld).environmentObject(store)
+        }
+        .confirmationDialog("Xoá cấu hình \"\(toDelete?.name ?? "")\"?",
+                            isPresented: Binding(get: { toDelete != nil }, set: { if !$0 { toDelete = nil } })) {
+            Button("Xoá", role: .destructive) { if let p = toDelete { store.delete(p) } }
+        } message: {
+            Text("Chỉ xoá lối tắt này. Thư mục và các bản sao lưu không bị ảnh hưởng.")
+        }
+    }
+}
+
+struct PresetEditor: View {
+    @EnvironmentObject var store: PresetStore
+    @Environment(\.dismiss) private var dismiss
+    @State var draft: Preset
+    let old: String?
+    @State private var error: String?
+
+    private var trimmedName: String { draft.name.trimmingCharacters(in: .whitespaces) }
+    private var nameTaken: Bool { store.items.contains { $0.name == trimmedName && $0.name != old } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(old == nil ? "Thêm cấu hình" : "Sửa cấu hình")
+                .font(.title3.weight(.semibold)).padding([.horizontal, .top], 20)
+            Form {
+                TextField("Tên", text: $draft.name, prompt: Text("ví dụ: Dự án → Ổ 4TB"))
+                FolderRow(label: "Nguồn", symbol: "folder", path: $draft.source) {
+                    if let p = chooseFolder("Chọn thư mục Nguồn", current: draft.source) {
+                        draft.source = p
+                        if trimmedName.isEmpty { draft.name = Preset.suggestedName(source: p, dest: draft.dest) }
+                    }
+                }
+                FolderRow(label: "Đích", symbol: "externaldrive", path: $draft.dest) {
+                    if let p = chooseFolder("Chọn thư mục Đích", current: draft.dest) { draft.dest = p }
+                }
+                TextField("Bỏ qua", text: $draft.exclude, prompt: Text("ví dụ: node_modules, .DS_Store"))
+            }
+            .formStyle(.grouped)
+            if let msg = error ?? (nameTaken ? "Đã có cấu hình tên \"\(trimmedName)\"." : nil) {
+                Text(msg).font(.callout).foregroundStyle(.red).padding(.horizontal, 20)
+            }
+            HStack {
+                Spacer()
+                Button("Huỷ", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Lưu") {
+                    var p = draft
+                    p.name = trimmedName
+                    if let e = store.save(p, old: old) { error = e } else { dismiss() }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(trimmedName.isEmpty || draft.source.isEmpty || draft.dest.isEmpty || nameTaken)
+            }
+            .padding(20)
+        }
+        .frame(width: 520)
     }
 }
 
@@ -555,8 +805,11 @@ struct WindowConfigurator: NSViewRepresentable {
 
 @main
 struct BackupSyncApp: App {
+    @StateObject private var presets = PresetStore()
+
     var body: some Scene {
-        WindowGroup("Backup & Sync") { ContentView() }
+        WindowGroup("Backup & Sync") { ContentView().environmentObject(presets) }
             .windowResizability(.contentSize)
+        Settings { SettingsView().environmentObject(presets) }
     }
 }

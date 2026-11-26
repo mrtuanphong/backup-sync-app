@@ -8,6 +8,9 @@
   fs-helper schedule-add daily HH:MM | hourly MM
   fs-helper schedule-list
   fs-helper schedule-remove LABEL
+  fs-helper preset-list              → các cấu hình đã lưu (JSON: [{name, source, dest, exclude}])
+  fs-helper preset-save JSON         → thêm/sửa một cấu hình; JSON có thể có "old" = tên cũ khi đổi tên
+  fs-helper preset-delete NAME
 """
 import json, os, plistlib, signal, subprocess, sys, time
 
@@ -205,6 +208,25 @@ def main(argv):
         plistlib.dump(plist, open(path, "wb"))
         subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", path], capture_output=True)
         print(f"Đã hẹn: {comment}")
+    elif cmd == "preset-list":
+        print(json.dumps(cfg.get("presets", []), ensure_ascii=False))
+    elif cmd == "preset-save":
+        p = json.loads(argv[1])
+        name = str(p.get("name", "")).strip()
+        if not name:
+            sys.exit("cần đặt tên cho cấu hình")
+        item = {"name": name, "source": str(p.get("source", "")).rstrip("/"),
+                "dest": str(p.get("dest", "")).rstrip("/"), "exclude": str(p.get("exclude", ""))}
+        old = str(p.get("old") or name)
+        presets = [x for x in cfg.get("presets", []) if x.get("name") not in (old, name)]
+        # Keep the edited preset in its old position; new ones go to the end.
+        pos = next((i for i, x in enumerate(cfg.get("presets", [])) if x.get("name") == old), len(presets))
+        presets.insert(min(pos, len(presets)), item)
+        cfg["presets"] = presets
+        save(cfg)
+    elif cmd == "preset-delete":
+        cfg["presets"] = [x for x in cfg.get("presets", []) if x.get("name") != argv[1]]
+        save(cfg)
     elif cmd == "schedule-list":
         for label, comment in schedules():
             print(f"{label}\t{comment}")
