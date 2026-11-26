@@ -6,9 +6,18 @@ App macOS chỉ có một màn hình, dùng để sao lưu, khôi phục và đ�
 
 ## Tải về và cài đặt
 
+> [!IMPORTANT]
+> **Lần mở đầu tiên, bạn phải bấm "Open Anyway" trong System Settings.**
+> App chưa được Apple công chứng (notarize), nên macOS sẽ báo *"Backup & Sync" Not Opened* và không cho mở. Đây là cảnh báo bình thường với app tải ngoài App Store, không phải lỗi. Cách mở:
+> 1. Bấm **Done** để đóng thông báo.
+> 2. Mở **System Settings → Privacy & Security**, kéo xuống mục **Security**.
+> 3. Bấm **Open Anyway** cạnh dòng *"Backup & Sync" was blocked…*, nhập mật khẩu máy, rồi bấm **Open Anyway** lần nữa.
+>
+> Chỉ cần làm một lần. Những lần sau app mở bình thường.
+
 1. Tải file `.zip` mới nhất ở trang [Releases](https://github.com/mrtuanphong/backup-sync-app/releases/latest), mở file zip.
 2. Kéo **Backup & Sync.app** vào thư mục **Applications** rồi mới mở. Lịch hẹn giờ ghi nhớ vị trí của app, nên đừng chạy thẳng từ Downloads.
-3. Lần mở đầu tiên macOS sẽ chặn vì app chưa được Apple công chứng. Vào **System Settings → Privacy & Security**, kéo xuống và bấm **Open Anyway**. Hoặc chạy lệnh:
+3. Mở app. Lần đầu sẽ bị chặn, hãy bấm **Open Anyway** như hướng dẫn ở khung trên. Hoặc chạy lệnh sau trong Terminal để bỏ qua bước này:
    `xattr -dr com.apple.quarantine "/Applications/Backup & Sync.app"`
 4. Nếu macOS hỏi cài **Command Line Tools** thì bấm Install, vì app cần `python3` của Apple.
 
