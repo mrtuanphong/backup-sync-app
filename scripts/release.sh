@@ -26,15 +26,26 @@ SHA="$(shasum -a 256 "$ZIP" | cut -d' ' -f1)"
 NOTES="$(cat <<EOF
 ## Cài đặt
 
-1. Tải **$(basename "$ZIP")** bên dưới, mở file zip.
-2. Kéo **Backup & Sync.app** vào thư mục **Applications** rồi mới mở (lịch hẹn giờ ghi nhớ vị trí của app, nên đừng chạy thẳng từ Downloads).
-3. Lần mở đầu tiên macOS sẽ chặn vì app chưa được Apple công chứng: vào **System Settings → Privacy & Security**, kéo xuống, bấm **Open Anyway**.
-   Hoặc chạy trong Terminal: \`xattr -dr com.apple.quarantine "/Applications/Backup & Sync.app"\`
-4. Nếu macOS hỏi cài **Command Line Tools** thì bấm Install (app cần \`python3\` của Apple).
+Cần máy Mac chạy **macOS 13 (Ventura) trở lên**.
 
-Yêu cầu: macOS 13 trở lên, chip Apple Silicon hoặc Intel.
+1. Bấm vào file **$(basename "$ZIP")** ở mục *Assets* bên dưới để tải.
+2. Mở file zip vừa tải (thường nằm trong **Downloads**), sẽ thấy app **Backup & Sync**.
+3. Kéo app vào thư mục **Applications** rồi mở app từ đó.
 
-SHA-256: \`$SHA\`
+> [!IMPORTANT]
+> **Lần mở đầu tiên, bạn phải bấm "Open Anyway" trong System Settings.**
+> App không tải từ App Store nên macOS sẽ báo *"Backup & Sync" Not Opened*. Đây là cảnh báo bình thường, không phải lỗi hay virus.
+> 1. Bấm **Done** để đóng thông báo.
+> 2. Mở **System Settings → Privacy & Security**, kéo xuống mục **Security**.
+> 3. Bấm **Open Anyway**, nhập mật khẩu máy, rồi bấm **Open Anyway** lần nữa.
+>
+> Chỉ cần làm một lần.
+
+Nếu máy hỏi cài **Command Line Tools** thì bấm **Install** và chờ cài xong. App cần công cụ miễn phí này của Apple để chạy.
+
+Hướng dẫn sử dụng đầy đủ: https://github.com/mrtuanphong/backup-sync-app#cách-dùng
+
+<sub>SHA-256: \`$SHA\`</sub>
 EOF
 )"
 
