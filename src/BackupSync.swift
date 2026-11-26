@@ -221,6 +221,14 @@ struct FolderRow: View {
 struct ContentView: View {
     @StateObject private var m = Model()
 
+    /// "v2.1 · build 20261126.1812" — the build number is the build time, stamped by scripts/build.sh.
+    static let buildLabel: String = {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let version = info["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info["CFBundleVersion"] as? String ?? "?"
+        return "v\(version) · build \(build)"
+    }()
+
     var body: some View {
         VStack(spacing: 0) {
             Form {
@@ -294,6 +302,9 @@ struct ContentView: View {
 
             Divider()
             HStack(spacing: 12) {
+                Text(Self.buildLabel)
+                    .font(.caption).foregroundStyle(.tertiary)
+                    .textSelection(.enabled)
                 if m.busy { ProgressView().controlSize(.small) }
                 Spacer()
                 Button("Xem trước") { m.preview() }

@@ -87,7 +87,7 @@ Kết quả mỗi lần chạy hiện ở mục **Kết quả** phía dưới.
 | `engine/fs-helper` | Cầu nối giữa app và phần xử lý (Python 3.9, dùng `/usr/bin/python3` của macOS): thiết lập, chạy, lịch hẹn |
 | `engine/folder-backup` | Sao lưu theo phiên bản bằng `rsync --link-dest` (bash, openrsync) |
 | `engine/folder-sync` | Đồng bộ hai thư mục A→B, B→A, hai chiều, có nhớ trạng thái (Python). App chưa dùng, có sẵn dạng lệnh |
-| `scripts/build.sh` | Build bản universal vào `build/` và cài vào `~/Applications` (`--no-install` để chỉ build) |
+| `scripts/build.sh` | Build bản universal vào `build/` và cài vào `/Applications` (ghi đè bản cũ). Số build là thời điểm build, dạng `YYYYMMDD.HHMM` (`--no-install` để chỉ build) |
 | `scripts/release.sh` | Build, nén zip và đăng lên GitHub Releases (tag theo phiên bản trong `Info.plist`) |
 | `scripts/install-cli.sh` | Cài `folder-sync` và `folder-backup` vào `~/.local/bin` |
 

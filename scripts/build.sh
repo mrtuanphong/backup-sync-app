@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build "Backup & Sync.app" into ./build/ and install it to ~/Applications (pass --no-install to skip).
+# Build "Backup & Sync.app" into ./build/ and install it to /Applications (replacing the old copy) (pass --no-install to skip).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/build/Backup & Sync.app"
@@ -15,12 +15,15 @@ lipo -create -output "$OUT/Contents/MacOS/BackupSync" "$TMP/BackupSync-arm64" "$
 cp "$ROOT/engine/fs-helper" "$ROOT/engine/folder-sync" "$ROOT/engine/folder-backup" "$OUT/Contents/Resources/"
 chmod +x "$OUT/Contents/Resources/"{fs-helper,folder-sync,folder-backup}
 cp "$ROOT/src/Info.plist" "$OUT/Contents/Info.plist"
+# Build number = build time (YYYYMMDD.HHMM), so every build can be told apart in the app and in About.
+BUILD="$(date +%Y%m%d.%H%M)"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$OUT/Contents/Info.plist"
 [ -f "$ROOT/src/AppIcon.icns" ] && cp "$ROOT/src/AppIcon.icns" "$OUT/Contents/Resources/"
 codesign --force --deep -s - "$OUT" 2>/dev/null
 codesign --verify --deep "$OUT"
-echo "Built: $OUT"
+echo "Built: $OUT (build $BUILD)"
 if [[ "${1:-}" != "--no-install" ]]; then
-  rm -rf "$HOME/Applications/Backup & Sync.app"
-  cp -R "$OUT" "$HOME/Applications/"
-  echo "Installed: $HOME/Applications/Backup & Sync.app"
+  rm -rf "/Applications/Backup & Sync.app"
+  ditto "$OUT" "/Applications/Backup & Sync.app"
+  echo "Installed: /Applications/Backup & Sync.app"
 fi

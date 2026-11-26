@@ -20,5 +20,5 @@ Standalone macOS app (owner: Phong). Read README.md first.
 - Do not delete at the top level of a mounted drive; the user confirms destructive actions.
 
 ## Build & test
-`./scripts/build.sh` (installs to ~/Applications). Test the engine against folders in a temp directory with
+`./scripts/build.sh` (installs to /Applications, replacing the old copy; CFBundleVersion = build time YYYYMMDD.HHMM, shown in the app footer). Test the engine against folders in a temp directory with
 `HOME=<tmp>/home` so settings and schedules do not touch the user's real ones; remove any test launchd job afterwards.
