@@ -1,3 +1,5 @@
+<img src="docs/icon.png" width="96" alt="">
+
 # Backup & Sync
 
 App trên máy Mac giúp bạn **sao lưu một thư mục** (ví dụ thư mục dự án, tài liệu) **sang ổ cứng ngoài**, và **lấy lại file** khi cần. Có thể bấm chạy ngay hoặc hẹn giờ cho app tự chạy mỗi ngày.
@@ -89,6 +91,7 @@ Kết quả mỗi lần chạy hiện ở mục **Kết quả** phía dưới.
 | `engine/folder-sync` | Đồng bộ hai thư mục A→B, B→A, hai chiều, có nhớ trạng thái (Python). App chưa dùng, có sẵn dạng lệnh |
 | `scripts/build.sh` | Build bản universal vào `build/` và cài vào `/Applications` (ghi đè bản cũ). Số build là thời điểm build, dạng `YYYYMMDD.HHMM` (`--no-install` để chỉ build) |
 | `scripts/release.sh` | Build, nén zip và đăng lên GitHub Releases (tag theo phiên bản trong `Info.plist`) |
+| `scripts/make-icon.sh` | Vẽ lại icon app (`make-icon.swift`) và tạo `src/AppIcon.icns` |
 | `scripts/install-cli.sh` | Cài `folder-sync` và `folder-backup` vào `~/.local/bin` |
 
 ### Chi tiết hành vi
