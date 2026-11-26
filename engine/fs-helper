@@ -159,14 +159,34 @@ def main(argv):
             if "--notify" in argv:
                 notify(msg)
             sys.exit(msg)
+        # --progress (the app): pass the engine's "@@…" progress lines straight through, keep the rest for the summary.
+        progress = "--progress" in argv and not dry
+
+        def emit(line):
+            if progress:
+                print(line, flush=True)
+
         out, code = [], 0
         if cfg["direction"] in ("b2a", "both"):
+            emit("@@PHASE restore")
             code, msg = run_restore(cfg, dry)
             out.append(msg)
         if cfg["direction"] in ("a2b", "both") and code == 0 and not cancelled:
-            r = subprocess.run(backup_cmd(cfg, dry), capture_output=True, text=True)
-            out.append((r.stdout + r.stderr).strip())
-            code = r.returncode
+            if progress:
+                p = subprocess.Popen(backup_cmd(cfg, dry), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     text=True, env=dict(os.environ, FB_PROGRESS="1"))
+                kept = []
+                for line in p.stdout:
+                    if line.startswith("@@"):
+                        emit(line.rstrip("\n"))
+                    else:
+                        kept.append(line)
+                code = p.wait()
+                out.append("".join(kept).strip())
+            else:
+                r = subprocess.run(backup_cmd(cfg, dry), capture_output=True, text=True)
+                out.append((r.stdout + r.stderr).strip())
+                code = r.returncode
         if cancelled:
             code = 130
             if not any("Đã huỷ" in o for o in out):

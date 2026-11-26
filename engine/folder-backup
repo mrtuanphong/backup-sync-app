@@ -172,10 +172,34 @@ on_cancel() {
 }
 trap on_cancel TERM INT
 
+PRUNE=()
+for e in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do PRUNE+=(-name "${e#--exclude=}" -prune -o); done
+
 echo "Đang chép…"
 start=$(date +%s)
-"${RSYNC[@]}" "$SRC/" "$RUN_TARGET/" >"$LOG" 2>&1
-rc=$?
+if [[ $DRY -eq 0 && "${FB_PROGRESS:-}" == 1 ]]; then
+  # Progress for the app (lines starting with @@ on stdout): rsync itemizes every entry it handles, copied or
+  # hard-linked, so the total is every entry in Nguồn. The "._name" lines are openrsync's xattr side files: skip
+  # them on both sides. Only non-itemize lines (errors, --stats) go to the log, so the log stays as small as before.
+  echo "@@PHASE count"
+  total=$(find "$SRC" ${PRUNE[@]+"${PRUNE[@]}"} -name '._*' -prune -o -print 2>/dev/null | wc -l | tr -d ' ')
+  echo "@@TOTAL $total"
+  echo "@@PHASE copy"
+  "${RSYNC[@]}" --itemize-changes "$SRC/" "$RUN_TARGET/" 2>&1 | awk -v logf="$LOG" '
+    /^[<>ch.*][fdLDS]/ {
+      name = $0; sub(/^[^ ]+ +/, "", name); sub(/\/$/, "", name); sub(/.*\//, "", name)
+      if (name ~ /^\._/) next
+      n++; if (n % 100 == 0) { print "@@DONE " n; fflush() }
+      next
+    }
+    { print > logf }
+    END { print "@@DONE " n + 0; fflush() }'
+  rc=${PIPESTATUS[0]}
+  echo "@@PHASE verify"
+else
+  "${RSYNC[@]}" "$SRC/" "$RUN_TARGET/" >"$LOG" 2>&1
+  rc=$?
+fi
 secs=$(( $(date +%s) - start ))
 
 if [[ $DRY -eq 1 ]]; then
@@ -208,8 +232,6 @@ if [[ $SNAPSHOT -eq 1 ]]; then
 fi
 
 # Kiểm tra: đếm file (kể cả ẩn) và symlink ở nguồn và bản sao, bỏ qua đúng những mục đã loại trừ.
-PRUNE=()
-for e in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do PRUNE+=(-name "${e#--exclude=}" -prune -o); done
 count() { find "$1" ${PRUNE[@]+"${PRUNE[@]}"} -path "$1/.backup-logs" -prune -o \( -type f -o -type l \) -print 2>/dev/null | wc -l | tr -d ' '; }
 n_src=$(count "$SRC"); n_dst=$(count "$TARGET")
 echo "Xong sau ${secs}s. File ở nguồn: $n_src · trong bản sao: $n_dst"

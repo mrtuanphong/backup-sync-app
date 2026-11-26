@@ -9,7 +9,9 @@ enum Helper {
     static var path: String { Bundle.main.path(forResource: "fs-helper", ofType: nil) ?? "" }
 
     @discardableResult
-    static func run(_ args: [String], onStart: ((pid_t) -> Void)? = nil) -> (code: Int32, out: String) {
+    /// Runs the helper and waits. `onLine` receives each output line as it arrives (used for "@@" progress lines).
+    static func run(_ args: [String], onStart: ((pid_t) -> Void)? = nil,
+                    onLine: ((String) -> Void)? = nil) -> (code: Int32, out: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         p.arguments = [path] + args
@@ -18,7 +20,19 @@ enum Helper {
         p.standardError = pipe
         do { try p.run() } catch { return (1, "Không chạy được: \(error.localizedDescription)") }
         onStart?(p.processIdentifier)
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        var data = Data(), pending = Data()
+        let handle = pipe.fileHandleForReading
+        while true {
+            let chunk = handle.availableData
+            if chunk.isEmpty { break }
+            data.append(chunk)
+            guard let onLine else { continue }
+            pending.append(chunk)
+            while let nl = pending.firstIndex(of: 10) {
+                onLine(String(decoding: pending[pending.startIndex..<nl], as: UTF8.self))
+                pending.removeSubrange(pending.startIndex...nl)
+            }
+        }
         p.waitUntilExit()
         return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
     }
@@ -136,6 +150,7 @@ final class Model: ObservableObject {
     @Published var confirmText: String?
     @Published var screen: Screen = .form
     @Published var cancelling = false
+    @Published var progress = RunProgress()
     private var runningPID: pid_t?
 
     init() { load() }
@@ -196,7 +211,7 @@ final class Model: ObservableObject {
 
     private static func clean(_ s: String) -> String {
         s.split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { !$0.hasPrefix("[20") && !$0.hasPrefix("Đang đọc") }
+            .filter { !$0.hasPrefix("[20") && !$0.hasPrefix("Đang đọc") && !$0.hasPrefix("@@") && !$0.hasPrefix("Terminated") }
             .joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -254,9 +269,15 @@ final class Model: ObservableObject {
         output = "Đang chạy…"
         screen = .running
         cancelling = false
+        progress = RunProgress()
         let started = Date(), direction = direction, source = source
         background({
-            Helper.run(["run"]) { pid in DispatchQueue.main.async { self.runningPID = pid } }
+            Helper.run(["run", "--progress"],
+                       onStart: { pid in DispatchQueue.main.async { self.runningPID = pid } },
+                       onLine: { line in
+                           guard line.hasPrefix("@@") else { return }
+                           DispatchQueue.main.async { self.progress.apply(line) }
+                       })
         }) { code, out in
             self.runningPID = nil
             let text = Model.clean(out)
@@ -335,7 +356,7 @@ struct ContentView: View {
         Group {
             switch m.screen {
             case .form: mainScreen
-            case .running: RunningView(direction: m.direction, cancelling: m.cancelling) { m.cancel() }
+            case .running: RunningView(direction: m.direction, progress: m.progress, cancelling: m.cancelling) { m.cancel() }
             case .done(let r): ResultView(result: r) { m.screen = .form }
             }
         }
@@ -680,8 +701,50 @@ struct PresetEditor: View {
 
 // MARK: - Running and result screens
 
+/// Progress reported by the engine as "@@PHASE x", "@@TOTAL n", "@@DONE n" lines.
+struct RunProgress {
+    var phase = ""          // restore | count | copy | verify
+    var total: Int?
+    var done = 0
+
+    mutating func apply(_ line: String) {
+        let parts = line.dropFirst(2).split(separator: " ", maxSplits: 1).map(String.init)
+        guard let key = parts.first else { return }
+        let value = parts.count > 1 ? parts[1] : ""
+        switch key {
+        case "PHASE": phase = value
+        case "TOTAL": total = Int(value)
+        case "DONE": done = Int(value) ?? done
+        default: break
+        }
+    }
+
+    /// 0…1 while copying with a known total; nil means "working, amount unknown" (indeterminate bar).
+    var fraction: Double? {
+        guard phase == "copy", let total, total > 0 else { return phase == "verify" ? 1 : nil }
+        return min(Double(done) / Double(total), 1)
+    }
+
+    var status: String {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.locale = Locale(identifier: "vi_VN")
+        func n(_ x: Int) -> String { f.string(from: NSNumber(value: x)) ?? "\(x)" }
+        switch phase {
+        case "restore": return "Đang khôi phục file về Nguồn…"
+        case "count": return "Đang tìm các mục cần sao lưu…"
+        case "copy":
+            guard let total else { return "Đang chép…" }
+            return "Đã xử lý \(n(min(done, total))) / \(n(total)) mục"
+        case "verify": return "Đang kiểm tra bản sao…"
+        default: return "Đang chuẩn bị…"
+        }
+    }
+}
+
 struct RunningView: View {
     let direction: Direction
+    let progress: RunProgress
     let cancelling: Bool
     let onCancel: () -> Void
     @State private var started = Date()
@@ -697,8 +760,25 @@ struct RunningView: View {
     var body: some View {
         VStack(spacing: 18) {
             Spacer()
-            ProgressView().controlSize(.large)
+            Image(systemName: direction == .b2a ? "arrow.down.doc.fill" : "externaldrive.fill.badge.timemachine")
+                .font(.system(size: 56)).foregroundStyle(.green)
             Text(cancelling ? "Đang huỷ…" : title).font(.title2.weight(.semibold))
+            VStack(alignment: .leading, spacing: 6) {
+                if let f = progress.fraction {
+                    ProgressView(value: f).progressViewStyle(.linear).tint(.green)
+                } else {
+                    ProgressView().progressViewStyle(.linear).tint(.green)
+                }
+                HStack {
+                    Text(progress.status).monospacedDigit()
+                    Spacer()
+                    if let f = progress.fraction, progress.phase == "copy" {
+                        Text("\(Int(f * 100))%").monospacedDigit()
+                    }
+                }
+                .font(.callout).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: 420)
             TimelineView(.periodic(from: .now, by: 1)) { ctx in
                 Text("Đã chạy \(Self.duration(Int(ctx.date.timeIntervalSince(started))))")
                     .monospacedDigit().foregroundStyle(.secondary)
