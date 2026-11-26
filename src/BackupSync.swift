@@ -404,6 +404,7 @@ struct ContentView: View {
                             .font(.callout)
                     }
                 }
+                .disabled(m.busy)
 
                 Section {
                     Picker("Kiểu sync", selection: $m.direction) {
@@ -418,6 +419,7 @@ struct ContentView: View {
                     Text("Tên thư mục/file, cách nhau bằng dấu phẩy. Để trống = sao lưu tất cả (kể cả file ẩn).")
                         .font(.callout).foregroundStyle(.secondary)
                 }
+                .disabled(m.busy)
 
                 Section {
                     Picker("Thời điểm", selection: $m.when) {
@@ -446,6 +448,7 @@ struct ContentView: View {
                 } header: {
                     Text(m.schedules.isEmpty ? "Lịch" : "Lịch (\(m.schedules.count) đã hẹn)")
                 }
+                .disabled(m.busy)
 
                 Section("Kết quả") {
                     ScrollView {
