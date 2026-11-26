@@ -145,7 +145,12 @@ final class Model: ObservableObject {
         background({ Helper.run(["run", "--dry-run"]) }) { code, out in
             let text = Model.clean(out)
             self.output = text
-            guard thenConfirm, code == 0 else { return }
+            guard thenConfirm else { return }
+            guard code == 0 else {
+                // Never fail silently: say why nothing was copied.
+                self.output = "⚠️ Chưa chép gì vì bước xem trước gặp lỗi (mã \(code)).\n\n" + text
+                return
+            }
             if text.contains("Không có gì để làm") { return }
             self.confirmText = Model.summary(text)
         }

@@ -134,12 +134,20 @@ if [[ $YES -eq 0 && $DRY -eq 0 ]]; then
 fi
 
 # -a: đệ quy, giữ symlink/quyền/ngày; -H: giữ hard link; -E: thuộc tính mở rộng macOS. File ẩn luôn được chép.
-RSYNC=(rsync -aHE --stats ${EXCLUDES[@]+"${EXCLUDES[@]}"})
-[[ $DRY -eq 1 ]] && RSYNC+=(-n --itemize-changes)
-[[ $MIRROR -eq 1 ]] && RSYNC+=(--delete)
-if [[ $SNAPSHOT -eq 1 && -d "$ROOT/latest/" ]]; then
-  RSYNC+=("--link-dest=$ROOT/latest/")
+RSYNC=(rsync -aH --stats ${EXCLUDES[@]+"${EXCLUDES[@]}"})
+# macOS openrsync bugs in dry-run (-n): with -E every file that has xattrs fails ("._name: openat"), and with
+# --link-dest into a folder that does not exist yet every file fails ("unlinkat: Bad file descriptor"); both exit 23.
+# So a dry run skips -E and compares against latest directly (same result: what is new or changed since the last
+# backup). The real run keeps -E and --link-dest.
+RUN_TARGET="$TARGET"
+if [[ $DRY -eq 1 ]]; then
+  RSYNC+=(-n --itemize-changes)
+  [[ $SNAPSHOT -eq 1 && -d "$ROOT/latest/" ]] && RUN_TARGET="$ROOT/latest"
+else
+  RSYNC+=(-E)
+  [[ $SNAPSHOT -eq 1 && -d "$ROOT/latest/" ]] && RSYNC+=("--link-dest=$ROOT/latest/")
 fi
+[[ $MIRROR -eq 1 ]] && RSYNC+=(--delete)
 
 LOGDIR="$ROOT/.backup-logs"
 if [[ $DRY -eq 0 ]]; then
@@ -152,14 +160,23 @@ RSYNC+=(--exclude=/.backup-logs)
 
 echo "Đang chép…"
 start=$(date +%s)
-"${RSYNC[@]}" "$SRC/" "$TARGET/" >"$LOG" 2>&1
+"${RSYNC[@]}" "$SRC/" "$RUN_TARGET/" >"$LOG" 2>&1
 rc=$?
 secs=$(( $(date +%s) - start ))
 
 if [[ $DRY -eq 1 ]]; then
   changes=$(grep -cE '^[<>ch.*][fdLDS]' "$LOG" || true)
-  echo "Chạy thử xong: $changes mục sẽ được chép hoặc cập nhật. Chi tiết: $LOG"
-  exit $rc
+  if [[ $rc -ne 0 ]]; then
+    echo "CÓ LỖI khi chạy thử (mã $rc). Xem: $LOG"
+    grep -iE 'error|denied|failed' "$LOG" | head -10
+    exit $rc
+  fi
+  if [[ "$RUN_TARGET" != "$TARGET" ]]; then
+    echo "Chạy thử xong: $changes mục mới hoặc đã thay đổi so với bản sao lưu gần nhất. Chi tiết: $LOG"
+  else
+    echo "Chạy thử xong: $changes mục sẽ được chép. Chi tiết: $LOG"
+  fi
+  exit 0
 fi
 
 if [[ $rc -ne 0 ]]; then
